@@ -29,6 +29,7 @@ La conexion se toma de SOURCE_DATABASE_URL (independiente de DATABASE_URL, que
 es la base de CONTROL del middleware).
 """
 
+import logging
 import os
 from contextlib import contextmanager
 from typing import Optional
@@ -48,6 +49,8 @@ from sqlalchemy.orm import Session, declarative_base, sessionmaker
 from sqlalchemy.types import JSON
 
 from core.models_db import _ahora
+
+logger = logging.getLogger("api-odoo")
 
 # Base propia: estas tablas viven en la DB del CLIENTE, no en la de control.
 SourceBase = declarative_base()
@@ -69,7 +72,20 @@ class ColaSincronizacion(SourceBase):
     entidad = Column(String(50), nullable=False)        # clave en mappings.yaml
     id_origen = Column(String(100), nullable=False)      # id de negocio (idempotencia)
     payload = Column(JSON, nullable=False)               # registro para el mapper
+    # Respuesta ORIGINAL del sistema de origen, tal cual llego, sin traducir.
+    # 'payload' guarda solo lo que el mapper necesita; si el origen anade manana
+    # un campo que hoy ignoramos, no quedaria rastro. Nullable a proposito: las
+    # filas encoladas a mano (pruebas, o el cliente escribiendo directo) no
+    # tienen original que guardar y no deben fallar por ello.
+    payload_original = Column(JSON, nullable=True)
     estado = Column(String(20), nullable=False, default="PENDIENTE")
+    # Resultado en Odoo, escrito de vuelta al procesar. id_odoo es la llave
+    # tecnica; numero_odoo es el numero fiscal ("INV/2026/00001"), por el que
+    # pregunta cualquiera que reclame una factura. Se guardan AQUI, en la base
+    # de origen, para que el cliente cruce su registro con la factura sin entrar
+    # a Odoo ni consultar la base de control del middleware.
+    id_odoo = Column(Integer, nullable=True)
+    numero_odoo = Column(String(64), nullable=True)
     error_detalle = Column(Text, nullable=True)
     creado_en = Column(DateTime(timezone=True), default=_ahora, nullable=False)
     procesado_en = Column(DateTime(timezone=True), nullable=True)
@@ -142,6 +158,48 @@ def init_source_db() -> None:
     """
     _init_engine()
     SourceBase.metadata.create_all(bind=_engine)
+    _migrar_columnas_resultado()
+
+
+# Columnas anadidas despues de la version inicial de la tabla, con su tipo por
+# dialecto: (nombre, tipo PostgreSQL, tipo SQLite).
+_COLUMNAS_NUEVAS = (
+    # SQLite no tiene JSON nativo, pero acepta el mismo contenido en TEXT y
+    # SQLAlchemy lo serializa igual.
+    ("payload_original", "JSON", "TEXT"),
+    ("id_odoo", "INTEGER", "INTEGER"),
+    ("numero_odoo", "VARCHAR(64)", "VARCHAR(64)"),
+)
+
+
+def _migrar_columnas_resultado() -> None:
+    """
+    Anade a una cola ya existente las columnas incorporadas despues.
+
+    create_all() crea tablas que faltan, pero NUNCA altera una existente: en una
+    base ya en marcha la columna nueva no aparece y todo insert fallaria. Se hace
+    aqui, y no con Alembic, porque son columnas nullable y anadir una herramienta
+    de migraciones por esto seria desproporcionado. Si el esquema acumula cambios
+    mas complejos (renombrar, cambiar tipos, migrar datos), este es el punto
+    donde toca adoptar migraciones de verdad.
+    """
+    from sqlalchemy import inspect, text
+
+    inspector = inspect(_engine)
+    if not inspector.has_table("cola_sincronizacion"):
+        return
+    existentes = {c["name"] for c in inspector.get_columns("cola_sincronizacion")}
+    es_postgres = _engine.dialect.name == "postgresql"
+
+    for nombre, tipo_pg, tipo_sqlite in _COLUMNAS_NUEVAS:
+        if nombre in existentes:
+            continue
+        tipo = tipo_pg if es_postgres else tipo_sqlite
+        with _engine.begin() as con:
+            con.execute(text(
+                f"ALTER TABLE cola_sincronizacion ADD COLUMN {nombre} {tipo}"
+            ))
+        logger.info("Cola: anadida la columna %s.", nombre)
 
 
 # ---------------------------------------------------------------------------
@@ -191,11 +249,18 @@ def marcar_resultado(
     fila_id: int,
     estado: str,
     error_detalle: Optional[str] = None,
+    id_odoo: Optional[int] = None,
+    numero_odoo: Optional[str] = None,
 ) -> None:
     """
     Escribe el resultado de una fila de vuelta en la DB del cliente: estado
-    (PROCESADO|ERROR), error si aplica y la marca de tiempo de procesado.
+    (PROCESADO|ERROR), error si aplica, la marca de tiempo de procesado y -si
+    vienen- el id_odoo y el numero fiscal de la factura creada.
     Es el unico permiso de ESCRITURA que necesita el middleware en la DB origen.
+
+    id_odoo / numero_odoo solo se escriben si vienen con valor: un fallo
+    posterior al create (por ejemplo al postear) deja la fila en ERROR pero con
+    el id ya asignado, y perderlo obligaria a buscar a mano que quedo a medias.
     """
     with get_source_session() as session:
         fila = session.get(ColaSincronizacion, fila_id)
@@ -203,5 +268,9 @@ def marcar_resultado(
             # La fila desaparecio (el cliente la borro): nada que marcar.
             return
         fila.estado = estado
+        if id_odoo is not None:
+            fila.id_odoo = id_odoo
+        if numero_odoo:
+            fila.numero_odoo = numero_odoo
         fila.error_detalle = error_detalle if estado == "ERROR" else None
         fila.procesado_en = _ahora()

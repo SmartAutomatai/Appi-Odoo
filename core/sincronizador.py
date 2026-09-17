@@ -206,7 +206,32 @@ def _postear_y_validar(
     OJO: action_post NO es idempotente en Odoo 19. Reposteario un asiento ya
     posteado devuelve "El asiento (...) debe ser un borrador". Por eso al
     retomar se consulta primero el estado y solo se postea si sigue en draft.
+
+    El registro puede pedir "postear": false para dejar el documento en
+    BORRADOR (draft) en vez de contabilizarlo. En ese caso no se genera asiento
+    contable y NO se valida el total (esa comprobacion lee amount_total de un
+    documento posteado): la factura queda creada, sin contabilizar, a la espera
+    de que alguien la confirme en Odoo. Por defecto se postea, para no cambiar
+    el comportamiento de las integraciones que ya existen.
     """
+    postear = registro.get("postear", True)
+
+    if not postear:
+        # Documento en borrador: creado pero sin contabilizar. No se postea ni
+        # se valida el total (requiere el documento posteado). Se marca
+        # PROCESADO igualmente: la sincronizacion cumplio lo que se le pidio.
+        state_store.log(
+            entidad, "postear", "OK", id_origen,
+            f"id_odoo={id_odoo} dejado en BORRADOR (postear=false)",
+        )
+        state_store.marcar_estado(entidad, id_origen, EstadoSync.PROCESADO)
+        return ResultadoSync(
+            id_origen=id_origen,
+            id_odoo=id_odoo,
+            estado=EstadoSync.PROCESADO.value,
+            idempotente=False,
+        )
+
     # 5. POST (action_post) para generar los asientos contables.
     try:
         if not _ya_posteado(odoo, model_odoo, id_odoo):

@@ -109,6 +109,47 @@ def test_fila_pendiente_se_sincroniza_y_queda_procesada(entorno):
     assert state_store.ya_procesado("factura", "F-1") == 999
 
 
+def test_escribe_id_y_numero_fiscal_de_vuelta_en_la_cola(entorno):
+    """
+    Al procesar una factura, el poller escribe id_odoo y numero_odoo de vuelta
+    en la cola del cliente: es lo que permite cruzar la nota de origen con la
+    factura sin entrar a Odoo. El numero se lee del 'name' del account.move.
+    """
+    poller, poller_source, state_store = entorno
+    _insertar_factura(poller_source)
+
+    odoo = MagicMock()
+
+    def execute(model, method, *args, **kwargs):
+        if model == "res.partner" and method == "search_read":
+            return [{"id": 7}]
+        if model == "res.currency" and method == "search_read":
+            return [{"id": 2}]
+        if model == "account.move" and method == "create":
+            return 999
+        if model == "account.move" and method == "read":
+            # El poller lee 'name' para el numero fiscal; el sincronizador lee
+            # 'amount_total' para validar. Se devuelven ambos.
+            return [{"id": 999, "amount_total": 121.0, "name": "INV/2026/00099"}]
+        return True
+
+    odoo.execute.side_effect = execute
+    monkey_tenant(poller, odoo)
+
+    res = poller.procesar_lote()
+    assert res.procesadas == 1
+
+    with poller_source.get_source_session() as s:
+        fila = (
+            s.query(poller_source.ColaSincronizacion)
+            .filter_by(id_origen="F-1")
+            .one()
+        )
+        assert fila.estado == "PROCESADO"
+        assert fila.id_odoo == 999
+        assert fila.numero_odoo == "INV/2026/00099"
+
+
 def test_fallo_de_datos_aisla_la_fila_sin_abortar_el_lote(entorno):
     poller, poller_source, state_store = entorno
     # F-1 valida; F-2 con NIF que no existe en Odoo -> MapeoError -> ERROR.
@@ -171,11 +212,23 @@ def test_idempotencia_no_duplica_en_odoo(entorno):
     _insertar_factura(poller_source, id_origen="F-1")
     creates_antes = _contar_creates(odoo)
 
+    reads_antes = sum(
+        1 for c in odoo.execute.call_args_list
+        if c.args[0] == "account.move" and c.args[1] == "read"
+    )
+
     res = poller.procesar_lote()
 
     assert res.procesadas == 1
     # No hubo un segundo create en Odoo: la idempotencia lo cortocircuito.
     assert _contar_creates(odoo) == creates_antes
+    # Y TAMPOCO un read: la idempotencia promete no tocar Odoo. Leer el numero
+    # fiscal en el reenvio idempotente rompia esa promesa (bug corregido).
+    reads_despues = sum(
+        1 for c in odoo.execute.call_args_list
+        if c.args[0] == "account.move" and c.args[1] == "read"
+    )
+    assert reads_despues == reads_antes
 
 
 def test_polling_deshabilitado_devuelve_lote_vacio(entorno, monkeypatch):

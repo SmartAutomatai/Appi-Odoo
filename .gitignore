@@ -52,3 +52,12 @@ resume/
 # Una auditoria describe donde estaban los huecos: util para el equipo,
 # innecesario de publicar.
 *.local.md
+
+# Trabajo ajeno a este repo que vive en la misma carpeta (contratos Solidity,
+# material de auditoria). No se borra, solo se oculta para que "git status"
+# vuelva a ser legible y no acabe commiteado por error.
+/token/
+/DeFiHackLabs/
+/Standard-Gold-Coin-main/
+/Standard-Gold-Coin-main*.zip
+/.gitmodules

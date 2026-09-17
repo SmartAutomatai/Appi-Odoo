@@ -69,6 +69,57 @@ class TestCompensacionPorHTTP:
         )
         assert "CANCELAD" in str(exc.value), "el error no avisa de la cancelacion"
 
+    def test_factura_descuadrada_con_cancel_bloqueado_dice_borrador(self):
+        """
+        Con la localizacion VE, button_cancel se bloquea (documento de retencion
+        de IVA). La factura queda en draft sin apuntes vigentes: el mensaje debe
+        decir BORRADOR, no 'CANCELADO' (que seria enganoso).
+        """
+        from unittest.mock import MagicMock
+        from core.facturacion import crear_factura
+        from core.sincronizador import SincronizacionError
+        from odoo_universal import OdooExecutionError
+
+        odoo = MagicMock()
+        odoo.acciones = []
+
+        def execute(model, method, *a, **k):
+            if model == "res.partner":
+                return [{"id": 7}]
+            if model == "account.journal":
+                return [{"id": 6}]
+            if method == "create":
+                return 999
+            if method == "action_post":
+                return True
+            if method == "read":
+                return [{"amount_total": 1150.0, "state": "posted"}]
+            if method == "button_draft":
+                odoo.acciones.append(method)
+                return True
+            if method == "button_cancel":
+                odoo.acciones.append(method)
+                raise OdooExecutionError(
+                    "No puede cancelar una factura cuyo documento de retencion "
+                    "de IVA no esta cancelado."
+                )
+            return None
+
+        odoo.execute.side_effect = execute
+
+        with pytest.raises(SincronizacionError) as exc:
+            crear_factura({
+                "factura_id": "F-WH", "cliente_nif": "B1", "fecha": "2026-08-26",
+                "total": 800.0, "lineas": [],
+            }, odoo)
+
+        # Intento los dos pasos, pero el mensaje refleja que quedo en BORRADOR.
+        assert odoo.acciones == ["button_draft", "button_cancel"]
+        assert "BORRADOR" in str(exc.value)
+        assert "CANCELADO" not in str(exc.value), (
+            "no debe decir 'cancelado' si quedo en borrador"
+        )
+
     def test_un_pago_descuadrado_se_cancela(self):
         """
         account.payment NO tiene button_draft/button_cancel (comprobado contra

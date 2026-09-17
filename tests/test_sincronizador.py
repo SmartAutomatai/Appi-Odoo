@@ -74,6 +74,35 @@ class TestFlujoExitoso:
         assert mapa.estado == "PROCESADO"
         assert mapa.id_odoo == 555
 
+    def test_postear_false_deja_en_borrador_sin_postear(self, entorno, odoo_ok):
+        """
+        Con postear:false la factura se crea pero NO se postea: queda en draft
+        en Odoo. Se marca PROCESADO igual (la sincronizacion cumplio lo pedido).
+        """
+        sincronizador, _, state_store = entorno
+        res = sincronizador.sincronizar_entidad(
+            "factura", {"fid": "F-DRAFT", "postear": False}, odoo_ok,
+        )
+
+        assert res.estado == "PROCESADO"
+        assert res.id_odoo == 555
+
+        # Llamo create pero NO action_post.
+        metodos = [c.args[1] for c in odoo_ok.execute.call_args_list]
+        assert "create" in metodos
+        assert "action_post" not in metodos
+
+        mapa = state_store.buscar_mapeo("factura", "F-DRAFT")
+        assert mapa.estado == "PROCESADO"
+
+    def test_postear_por_defecto_sigue_posteando(self, entorno, odoo_ok):
+        """Sin el campo postear, el comportamiento no cambia: se postea."""
+        sincronizador, _, _ = entorno
+        sincronizador.sincronizar_entidad("factura", {"fid": "F-DEF"}, odoo_ok)
+
+        metodos = [c.args[1] for c in odoo_ok.execute.call_args_list]
+        assert "action_post" in metodos
+
 
 # --- idempotencia end-to-end ---
 

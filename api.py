@@ -64,6 +64,18 @@ app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 init_db()
 logger.info("Base de datos de control inicializada.")
 
+# Modo pull: si hay SOURCE_DATABASE_URL, se provisiona la cola del cliente al
+# arrancar (crea la tabla si falta, anade columnas nuevas si es antigua). En un
+# despliegue donde la DB de origen la administre el cliente, create_all no falla
+# si la tabla ya existe; si no hay permiso de DDL, se registra y se sigue.
+if os.getenv("SOURCE_DATABASE_URL", ""):
+    try:
+        from core import poller_source  # noqa: E402
+        poller_source.init_source_db()
+        logger.info("Cola del poller (modo pull) inicializada.")
+    except Exception as e:  # noqa: BLE001
+        logger.warning("No se pudo inicializar la cola del poller: %s", e)
+
 # Routers de negocio (facturas, pagos). Endpoints con estado e idempotencia.
 # panel: dashboard de observabilidad (lectura de sync_map/sync_log).
 # asientos: crear/eliminar asientos contables (account.move tipo 'entry').

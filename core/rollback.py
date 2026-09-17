@@ -103,13 +103,20 @@ def compensar_descuadre(
     # Un pago no se cancela como una factura: modelos distintos, metodos
     # distintos (comprobado en Odoo 19).
     cancelar = cancelar_pago if entidad == "pago" else cancelar_factura
-    cancelada = cancelar(
+    resultado = cancelar(
         id_odoo, odoo, entidad=entidad, id_origen=id_origen,
         motivo=f"Descuadre detectado{' por ' + origen if origen else ''}",
     )
-    if cancelada:
+    # cancelar_pago devuelve bool (True/False); cancelar_factura devuelve un
+    # string de estado ("cancelada"/"borrador"/""). Se normaliza el mensaje para
+    # que refleje lo que de verdad paso, sin decir "cancelado" cuando quedo en
+    # borrador (la localizacion VE bloquea el cancel; ver cancelar_factura).
+    if resultado == "borrador":
+        return (f" | Documento id_odoo={id_odoo} dejado en BORRADOR en Odoo "
+                f"(sin apuntes vigentes); la localizacion bloqueo el cancel.")
+    if resultado:
         return f" | Documento id_odoo={id_odoo} CANCELADO automaticamente en Odoo."
-    return (f" | NO se pudo cancelar id_odoo={id_odoo}: "
+    return (f" | NO se pudo compensar id_odoo={id_odoo}: "
             f"REQUIERE INTERVENCION MANUAL.")
 
 
@@ -119,33 +126,67 @@ def cancelar_factura(
     entidad: str = "factura",
     id_origen: str = "",
     motivo: str = "",
-) -> bool:
+) -> str:
     """
     Compensa una factura ya creada en Odoo (draft + cancel).
 
-    Devuelve True si la compensacion se aplico, False si fallo (en cuyo caso
-    queda un log ERROR para intervencion manual). No relanza excepciones.
+    Lo que importa para la contabilidad es el button_draft: revierte los
+    asientos, dejando la factura SIN apuntes contables vigentes. El
+    button_cancel es el paso final que la marca 'cancel'.
+
+    Con la localizacion venezolana (smai_l10n_ve_19) ese ultimo paso puede
+    quedar bloqueado: al postear, la localizacion crea un documento de
+    retencion de IVA (account.wh.iva) vinculado, y no deja cancelar la factura
+    mientras ese documento no se cancele antes. En ese caso la factura se queda
+    en 'draft' -sin contabilidad viva, que es lo que buscamos- y se considera
+    compensacion ACEPTABLE, no un fallo: no ensucia los libros y no exige
+    intervencion urgente. Se registra para que quede constancia del estado.
+
+    Devuelve el estado en que quedo, como string truthy/falsy:
+      "cancelada" - draft + cancel completos.
+      "borrador"  - draft ok pero cancel bloqueado (tipico con la localizacion):
+                    sin apuntes vigentes, aceptable.
+      ""          - ni siquiera se pudo llevar a draft: intervencion humana.
+    Los tres se pueden usar como bool (los dos primeros son truthy). No relanza.
     """
     ref = id_origen or str(id_odoo)
+
+    # Paso 1 (el que de verdad limpia la contabilidad): a borrador.
     try:
-        # Primero a borrador (revierte los asientos), luego cancelar.
         odoo.execute("account.move", "button_draft", [id_odoo])
+    except OdooExecutionError as e:
+        # Ni a borrador: los asientos siguen vivos. Intervencion humana.
+        state_store.log(
+            entidad, "rollback", "ERROR", ref,
+            f"NO se pudo llevar a borrador id_odoo={id_odoo}: {e}. "
+            f"INTERVENCION MANUAL. Motivo original: {motivo}",
+        )
+        logger.error(
+            "ROLLBACK_FALLO | entidad=%s ref=%s id_odoo=%s error=%s",
+            entidad, ref, id_odoo, e,
+        )
+        return ""
+
+    # Paso 2 (marcar 'cancel'): puede bloquearlo la localizacion. La factura ya
+    # esta en draft sin apuntes vigentes, asi que un fallo aqui NO es critico.
+    try:
         odoo.execute("account.move", "button_cancel", [id_odoo])
         state_store.log(
             entidad, "rollback", "OK", ref,
             f"Factura id_odoo={id_odoo} cancelada. Motivo: {motivo}",
         )
         logger.info("ROLLBACK_OK | entidad=%s ref=%s id_odoo=%s", entidad, ref, id_odoo)
-        return True
+        return "cancelada"
     except OdooExecutionError as e:
-        # No se pudo compensar: requiere intervencion humana.
+        # Draft si, cancel no (tipico con la retencion de IVA de la
+        # localizacion). Sin apuntes vigentes: aceptable, se deja constancia.
         state_store.log(
-            entidad, "rollback", "ERROR", ref,
-            f"NO se pudo cancelar id_odoo={id_odoo}: {e}. INTERVENCION MANUAL. "
-            f"Motivo original: {motivo}",
+            entidad, "rollback", "OK", ref,
+            f"Factura id_odoo={id_odoo} en BORRADOR (sin apuntes vigentes); "
+            f"no se pudo marcar 'cancel': {e}. Motivo: {motivo}",
         )
-        logger.error(
-            "ROLLBACK_FALLO | entidad=%s ref=%s id_odoo=%s error=%s",
-            entidad, ref, id_odoo, e,
+        logger.warning(
+            "ROLLBACK_PARCIAL | entidad=%s ref=%s id_odoo=%s en draft, cancel "
+            "bloqueado: %s", entidad, ref, id_odoo, e,
         )
-        return False
+        return "borrador"

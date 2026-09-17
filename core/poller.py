@@ -59,20 +59,52 @@ def _despachar(entidad: str, payload: dict, odoo: OdooUniversalAPI):
     debe/haber), asi que no viven en el YAML: sin este despacho, el modo pull
     solo admitiria facturas y pagos.
 
-    Devuelve (id_odoo, texto_resultado) para la traza.
+    Devuelve (id_odoo, numero_odoo, texto_resultado). numero_odoo es el numero
+    fiscal de la factura ("INV/2026/00001"); se escribe de vuelta en la cola
+    para que el cliente cruce su registro con la factura sin entrar a Odoo. Solo
+    las facturas lo tienen: en ajustes de stock y asientos es None.
     """
     if entidad == "ajuste_stock":
         r = ajustar_stock(payload, odoo)
-        return r.get("quant_id"), f"quant_id={r.get('quant_id')}"
+        return r.get("quant_id"), None, f"quant_id={r.get('quant_id')}"
     if entidad == "asiento":
         r = crear_asiento(payload, odoo)
-        return r.get("id_odoo"), f"id_odoo={r.get('id_odoo')}"
+        return r.get("id_odoo"), None, f"id_odoo={r.get('id_odoo')}"
 
     resultado = sincronizar_entidad(entidad, payload, odoo)
-    return resultado.id_odoo, (
+    # El numero fiscal SOLO se lee cuando la factura se acaba de crear. En un
+    # reenvio idempotente NO se lee: la idempotencia promete no tocar Odoo, y un
+    # read() lo romperia. En ese caso numero=None y marcar_resultado no
+    # sobrescribe lo que ya hubiera en la cola.
+    numero = None
+    if not resultado.idempotente:
+        numero = _numero_de_factura(entidad, resultado.id_odoo, odoo)
+    return resultado.id_odoo, numero, (
         f"id_odoo={resultado.id_odoo}"
+        + (f" ({numero})" if numero else "")
         + (" (idempotente)" if resultado.idempotente else "")
     )
+
+
+def _numero_de_factura(entidad: str, id_odoo, odoo: OdooUniversalAPI):
+    """
+    Lee el numero fiscal ('name') de una factura recien creada.
+
+    Solo para account.move; para otras entidades devuelve None sin tocar Odoo.
+    Un fallo al leerlo NO debe tumbar la fila (ya esta creada y posteada), asi
+    que se traga la excepcion: el numero es un dato de conveniencia.
+
+    OJO: no llamar en un reenvio idempotente. La idempotencia promete no tocar
+    Odoo; este read() lo romperia (ver el guardia en _despachar).
+    """
+    if not id_odoo or entidad not in ("factura", "nota_credito",
+                                      "factura_proveedor", "nota_debito"):
+        return None
+    try:
+        datos = odoo.execute("account.move", "read", [id_odoo], fields=["name"])
+        return datos[0]["name"] if datos else None
+    except Exception:
+        return None
 
 
 @dataclass
@@ -99,8 +131,13 @@ def _procesar_fila(fila: dict, odoo: OdooUniversalAPI):
     payload = fila["payload"]
 
     try:
-        _, detalle_ok = _despachar(entidad, payload, odoo)
-        poller_source.marcar_resultado(fila_id, "PROCESADO")
+        id_odoo, numero_odoo, detalle_ok = _despachar(entidad, payload, odoo)
+        # El id y el numero de la factura se escriben de vuelta en la cola: es
+        # lo que permite cruzar una nota de origen con su factura sin entrar a
+        # Odoo ni consultar la base de control del middleware.
+        poller_source.marcar_resultado(
+            fila_id, "PROCESADO", id_odoo=id_odoo, numero_odoo=numero_odoo,
+        )
         state_store.log(entidad, "poller", "OK", id_origen, f"cola#{fila_id} -> {detalle_ok}")
         return True
     except OdooConnectionError:
@@ -141,10 +178,18 @@ def _procesar_fila(fila: dict, odoo: OdooUniversalAPI):
             origen=f"el poller (cola#{fila_id})",
         )
 
+        # Si el fallo ocurrio DESPUES del create (al postear, o por descuadre),
+        # el documento existe en Odoo y el sincronizador guardo su id en el
+        # sync_map. Se recupera para escribirlo tambien en la cola: sin el,
+        # habria que buscar a mano que quedo a medias en Odoo.
+        mapa = state_store.buscar_mapeo(entidad, id_origen)
         # La fila queda en ERROR, no PENDIENTE: reintentarla sola volveria a
         # crear y cancelar la misma factura en bucle. El cliente corrige el
         # importe en su sistema y la reencola.
-        poller_source.marcar_resultado(fila_id, "ERROR", error_detalle=detalle)
+        poller_source.marcar_resultado(
+            fila_id, "ERROR", error_detalle=detalle,
+            id_odoo=mapa.id_odoo if mapa else None,
+        )
         state_store.log(entidad, "poller", "ERROR", id_origen, f"cola#{fila_id}: {detalle}")
         logger.info("Poller: fila cola#%s en ERROR: %s", fila_id, detalle)
         return False
