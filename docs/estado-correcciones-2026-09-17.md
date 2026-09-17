@@ -34,39 +34,8 @@ factura emitida con un dato fiscal sin validar.
 
 ---
 
-## 2. Un bug nuevo, encontrado hoy al verificar
 
-Al comprobar el estado real apareció algo que **no se había visto antes porque
-hasta ahora no había datos**: el tenant tenía 0 notas de entrega.
-
-**Hoy ya hay 3 notas y 2 órdenes.** Y con ellas, el fallo:
-
-| | |
-|---|---|
-| Lo que esperaba nuestro filtro | `Facturada` |
-| Lo que devuelve la API | `Facturado` |
-
-Una letra. La comparación es exacta, así que **las dos notas facturables se
-descartaban en silencio**: sin error, sin aviso, sin nada en el panel. El
-sistema habría parecido correcto sin llegar a facturar nunca.
-
-**Corregido** (`SMARTIER_ESTADOS_FACTURAR=Facturado`) y verificado:
-
-```
-'Facturado'  -> SE ENCOLA
-'Entregado'  -> SE DESCARTA     (correcto: aún no toca facturar)
-```
-
-No hizo falta tocar código: el valor ya era configurable por entorno. Queda
-guardado también en el `.env` de la rama para que no se pierda.
-
-> **La lección:** este fallo era invisible con el tenant vacío. Conviene
-> revisar los demás valores de estado en cuanto haya datos de los que
-> aprender — hasta ahora estaban puestos por suposición.
-
----
-
-## 3. Estado real de los datos (hoy)
+## 2. Estado real de los datos (hoy)
 
 | Recurso | 21/08 | **17/09** |
 |---|---|---|
@@ -88,7 +57,7 @@ Las notas y sus estados:
 
 ---
 
-## 4. ¿Está todo bien? — La respuesta honesta
+## 3. ¿Está todo bien? — La respuesta honesta
 
 **Lo que funciona:** la cadena completa. Leemos la API, traducimos la nota al
 formato de Odoo y la encolamos correctamente. Comprobado con las notas reales
@@ -111,9 +80,9 @@ nuestro y no se arregla con código.
 
 ---
 
-## 5. Qué hace falta para poder facturar
+## 4. Qué hace falta para poder facturar
 
-### 5.1 El RIF — bloqueo principal (Turicopy)
+### 4.1 El RIF — bloqueo principal (Turicopy)
 
 El RIF **solo se puede asignar a clientes de tipo Empresa** en Smartier.
 Nuestros 4 clientes están dados de alta como `Contacto`, así que al operador
@@ -131,7 +100,7 @@ Hay que decidirlo **antes** de que empiecen a recrear clientes:
 - **Opción B** — cargar los RIF a mano en Odoo y dejar Smartier como está. El
   sincronizador no los pisa (`vat` solo se envía cuando Smartier trae valor).
 
-### 5.2 Pendiente de Smartier
+### 4.2 Pendiente de Smartier
 
 1. **El nombre real del filtro de fecha** para `/external/notas-entrega` y
    `/external/ordenes`. Verificamos que `FechaDesde` no se aplica y probamos 13
@@ -140,18 +109,90 @@ Hay que decidirlo **antes** de que empiecen a recrear clientes:
    digan — cambia cómo dimensionamos la ingesta.
 2. **Que verifiquen el control de documento obligatorio** en nuestra instancia
    (se ofrecieron en su consulta 1).
-3. **Confirmar la lista de estados** de nota de entrega y de orden. Hoy hemos
-   visto `Facturado`, `Entregado` y `Terminado`; el bug de §2 nació de suponer
-   uno. Con el catálogo completo dejamos de adivinar.
 
-### 5.3 Pendiente nuestro, antes de producción
+---
 
-- Plan contable venezolano oficial (el actual es un mínimo de 7 cuentas de
-  prueba).
-- Decidir `wh_iva_agent` / `islr_withholding_agent` de la compañía: están en
-  `True` por defecto del módulo, nadie lo decidió.
-- Reintento automático de los errores transitorios de la cola: hoy una fila en
-  `ERROR` **no se reintenta sola**. Es el hueco más grande que queda.
+## 5. Lo que Smartier NO nos da
+
+Inventario levantado **consultando la API real** el 17/09/2026 (no la
+documentación): todos los campos que devuelve cada recurso, uniendo varias filas
+para no dar por ausente un campo que venga `null` en una y con valor en otra.
+
+### 5.1 Lo que sí llega, recurso por recurso
+
+| Recurso | Campos |
+|---|---|
+| **clientes** | `Id`, `Nombre`, `RazonSocial`, `Email`, `Estado`, `Tipo`, `CreadoUtc`, `Documento{Tipo, Contenido}` |
+| **notas-entrega** | `Id`, `Estado`, `Tipo`, `Cantidad`, `CantidadTerminada`, `Descuento`, `Direccion`, `Comentarios`, 4 fechas, `PrecioUnitario{Monto, Moneda}`, `Planta`, `Transportista`, `Contacto`, `Orden{Id, Referencia, Cliente, Producto}` |
+| **ordenes** | `Id`, `Estado`, `Referencia`, `Pausado`, `Prioritario`, `PlazoEntrega`, 3 fechas, `Cliente`, `Producto`, `Vendedor` |
+| **productos** | `Id`, `Nombre`, `Estado`, `Tipo`, `PorcentajeIVA`, `Exento` |
+
+### 5.2 Retenciones: no existen en la API
+
+**Ningún recurso expone un solo campo de retención.** Ni IVA ni ISLR, ni en el
+cliente, ni en la orden, ni en la nota:
+
+| Dato fiscal | ¿Lo da Smartier? | De dónde sale |
+|---|---|---|
+| ¿Es agente de retención de IVA? | **No** | Odoo (`wh_iva_agent`) |
+| % de retención de IVA (75 / 100) | **No** | Odoo, posición fiscal |
+| ¿Es agente de retención de ISLR? | **No** | Odoo (`islr_withholding_agent`) |
+| % de retención de ISLR (1-5) | **No** | Odoo, posición fiscal |
+| Nº de comprobante de retención | **No** | Odoo / SENIAT |
+| Tipo de contribuyente (ordinario / especial) | **No** | Odoo, posición fiscal |
+
+Ellos ya lo confirmaron (consulta 3): **no hay campos personalizados por tenant**
+y las categorías del CRM no se exponen en `/external`. No es un olvido, es el
+alcance del producto.
+
+**Consecuencia:** las retenciones son **competencia exclusiva de Odoo**, y la
+sincronización no debe tocarlas nunca. Ya está así por diseño:
+`CAMPOS_ACTUALIZABLES` deja fuera los campos fiscales, y al **crear** un
+contacto se fijan `wh_iva_agent` e `islr_withholding_agent` a `False` de forma
+explícita — porque `l10n_ve_full` los declara con `default=True` y, sin eso, un
+cliente nuevo quedaría marcado como agente de retención **sin que nadie lo
+decidiera**. Al actualizar no se envía ningún campo fiscal, para no revertir lo
+que contabilidad configuró a mano.
+
+### 5.3 Impuestos: solo en el catálogo, no en la nota
+
+El producto **sí** trae `PorcentajeIVA` y `Exento`. Hoy el catálogo entero son
+**58 productos, todos al 16 %, ninguno exento**.
+
+Pero la **nota de entrega no repite el IVA de su producto**. Verificado hoy con
+la nota 3: el producto 344 está al 16 % en el catálogo, y en la nota traducida
+`producto_iva` llega `null`.
+
+**No es un problema:** el IVA no se envía a Odoo, que lo resuelve desde la ficha
+del producto. Es más robusto que copiarlo — si mañana cambia la alícuota, se
+cambia en un sitio. Conviene saberlo para no buscar en la nota un dato que está
+en el catálogo.
+
+### 5.4 Lo demás que falta y Odoo necesita
+
+| Dato | ¿Smartier? | De dónde sale |
+|---|---|---|
+| **RIF del cliente** | Campo existe, **los 4 vienen vacíos** | **Bloqueo actual** (§4.1) |
+| Dirección fiscal del cliente | **No** (la nota trae la de *entrega*) | Odoo, ficha del contacto |
+| Teléfono del cliente | **No** | Odoo |
+| Condiciones de pago / vencimiento | **No** | Odoo, ficha del cliente |
+| Tasa de cambio USD→VES | **No** | Odoo, tabla de tasas (BCV) |
+| Cuenta contable de ingreso | **No** | Odoo, ficha del producto |
+| Nº de factura fiscal / control | **No** | Odoo, secuencia del diario |
+| Nº de orden de compra del cliente | Solo `Referencia` (texto libre) | — |
+| Vendedor como comercial de Odoo | Solo nombre en la orden | Sin enlazar |
+
+**El patrón:** Smartier es la fuente de verdad de **qué se vendió, a quién y por
+cuánto**; Odoo lo es de **cómo tributa eso**. La división es correcta y no
+conviene borrarla — pedirle a Smartier datos fiscales sería duplicar la
+configuración contable en un sitio donde nadie la mantiene.
+
+**Las dos excepciones** son los datos que Smartier debería dar y hoy no da:
+
+1. **El RIF** — el campo existe (`Documento`), pero exige cliente tipo Empresa
+   (§4.1). Sin él no hay factura.
+2. **La dirección fiscal** — hoy solo llega la de entrega (`"Valencia"`), que no
+   sirve para el documento fiscal. Hay que cargarla en Odoo.
 
 ---
 
@@ -168,5 +209,5 @@ El sistema **no está listo para facturar**, y el motivo no es técnico: es que
 los clientes no tienen identificación fiscal. En cuanto haya RIF, las notas que
 hoy quedan en `ERROR` se procesan reencolándolas, sin tocar código.
 
-Lo urgente es **decidir la vía del RIF** (§5.1), porque condiciona el histórico
+Lo urgente es **decidir la vía del RIF** (§4.1), porque condiciona el histórico
 de clientes en Odoo y conviene resolverlo antes de que se recree ninguno.
