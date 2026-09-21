@@ -162,3 +162,47 @@ class TestErrores:
         assert mapa.estado == "ERROR"
         assert mapa.id_odoo == 777          # se creo pero no se posteo
         assert "777" in mapa.error
+
+    def test_error_sql_en_create_no_se_filtra_al_cliente(self, entorno):
+        # H-5b por la via de negocio: un OdooExecutionError con SQL de
+        # PostgreSQL no debe llegar al mensaje que sube al cliente. El log
+        # interno (mapa.error) si conserva el crudo para diagnostico.
+        sincronizador, _, state_store = entorno
+        from odoo_universal import OdooExecutionError
+
+        sql = ('relation "account_move" does not exist\n'
+               'LINE 1: SELECT * FROM account_move WHERE ...')
+        odoo = MagicMock()
+        odoo.execute.side_effect = OdooExecutionError(sql)
+
+        with pytest.raises(sincronizador.SincronizacionError) as exc:
+            sincronizador.sincronizar_entidad("factura", {"fid": "F-SQL"}, odoo)
+
+        mensaje = str(exc.value)
+        assert "SELECT" not in mensaje and "account_move" not in mensaje, (
+            "el SQL de PostgreSQL no debe filtrarse al cliente"
+        )
+        assert "Referencia:" in mensaje, "debe dar una referencia de incidencia"
+        # El crudo si queda registrado internamente.
+        mapa = state_store.buscar_mapeo("factura", "F-SQL")
+        assert "account_move" in mapa.error
+
+    def test_error_sql_en_postear_no_se_filtra_al_cliente(self, entorno):
+        sincronizador, _, state_store = entorno
+        from odoo_universal import OdooExecutionError
+
+        def execute(model, method, *a, **k):
+            if method == "create":
+                return 888
+            raise OdooExecutionError('column "x" does not exist\nLINE 2: ...')
+
+        odoo = MagicMock()
+        odoo.execute.side_effect = execute
+
+        with pytest.raises(sincronizador.SincronizacionError) as exc:
+            sincronizador.sincronizar_entidad("factura", {"fid": "F-SQL2"}, odoo)
+
+        mensaje = str(exc.value)
+        assert "column" not in mensaje and "LINE" not in mensaje
+        assert "id=888" in mensaje, "debe conservar el id creado para el rollback"
+        assert "Referencia:" in mensaje

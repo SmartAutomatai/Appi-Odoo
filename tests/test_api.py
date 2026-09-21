@@ -58,6 +58,25 @@ class TestHealth:
         assert data["status"] == "ok"
         assert data["odoo_conectado"] is True
 
+    def test_health_publico_no_filtra_la_lista_blanca(self):
+        # Auditoria: /health en abierto revelaba modelos/metodos permitidos,
+        # la version de Odoo y el estado de la autenticacion. Un anonimo no
+        # debe obtener de aqui un mapa de la superficie interna.
+        data = client.get("/health").json()
+        for campo in ("modelos_permitidos", "metodos_permitidos",
+                      "odoo_version", "autenticacion"):
+            assert campo not in data, f"/health publico no debe exponer {campo}"
+
+    def test_detalle_exige_api_key(self, monkeypatch):
+        # El detalle operativo se movio a /health/detalle, protegido.
+        # Con API_KEY configurada, sin cabecera -> 401.
+        monkeypatch.setenv("API_KEY", "clave-de-prueba")
+        assert client.get("/health/detalle").status_code == 401
+        # Con la cabecera correcta -> 200 y ahi si aparece la lista blanca.
+        r = client.get("/health/detalle", headers={"X-Api-Key": "clave-de-prueba"})
+        assert r.status_code == 200
+        assert "modelos_permitidos" in r.json()
+
 
 # --- /odoo autenticacion ---
 
@@ -128,6 +147,22 @@ class TestWhitelist:
             "model": "cualquier.modelo", "method": "cualquier_metodo"
         })
         assert response.status_code == 200
+
+    def test_el_rechazo_no_enumera_la_lista_blanca(self, monkeypatch):
+        # Auditoria: el 422 no debe regalar el mapa completo de modelos/metodos
+        # permitidos (mismo dato que se retiro de /health).
+        monkeypatch.setattr(api_module, "ALLOWED_MODELS", {"res.partner", "account.move"})
+        monkeypatch.setattr(api_module, "ALLOWED_METHODS", {"search_read"})
+
+        r = client.post("/odoo", json={"model": "hr.employee", "method": "search_read"})
+        assert r.status_code == 422
+        cuerpo = r.text
+        assert "hr.employee" in cuerpo, "debe decir QUE modelo se rechazo"
+        assert "account.move" not in cuerpo, "no debe listar los demas permitidos"
+
+        r2 = client.post("/odoo", json={"model": "res.partner", "method": "unlink"})
+        assert r2.status_code == 422
+        assert "search_read" not in r2.text, "no debe listar los metodos permitidos"
 
 
 # --- /odoo errores ---

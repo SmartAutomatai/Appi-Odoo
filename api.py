@@ -30,6 +30,7 @@ from odoo_universal import (  # noqa: E402
 )
 from core.state_store import buscar_mapeo, init_db  # noqa: E402
 from core.seguridad import (  # noqa: E402
+    LIMITE_LECTURA,
     LIMITE_NEGOCIO,
     error_interno,
     sanear_error_odoo,
@@ -52,10 +53,22 @@ logger = logging.getLogger("api-odoo")
 # FastAPI app
 # ---------------------------------------------------------------------------
 
+# Documentacion interactiva (/docs, /redoc, /openapi.json). Abierta revela toda
+# la estructura de la API -esquemas, modelos, endpoints- a cualquier anonimo que
+# llegue al puerto (auditoria, seccion 1). Se puede cerrar en produccion con
+# EXPONER_DOCS=false sin tocar codigo; por defecto sigue abierta para no romper
+# el flujo de desarrollo. Cerrada, esas rutas devuelven 404.
+_exponer_docs = os.getenv("EXPONER_DOCS", "true").strip().lower() not in (
+    "false", "0", "no",
+)
+
 app = FastAPI(
     title="API-Odoo Middleware",
     description="Middleware universal para conectar Odoo con agentes externos.",
     version="1.0.0",
+    docs_url="/docs" if _exponer_docs else None,
+    redoc_url="/redoc" if _exponer_docs else None,
+    openapi_url="/openapi.json" if _exponer_docs else None,
 )
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
@@ -168,22 +181,23 @@ class OdooRequest(BaseModel):
     kwargs: dict = {}
     tenant: str = "default"
 
+    # Los mensajes de rechazo NO enumeran la lista blanca: devolver
+    # "Permitidos: [...]" en el 422 regalaba a cualquiera el mapa completo de
+    # modelos/metodos accesibles -el mismo dato que se retiro de /health-. Se
+    # dice que ESE modelo/metodo no esta permitido, sin listar el resto; quien
+    # necesite la lista la consulta en /health/detalle (con API Key).
     @field_validator("model")
     @classmethod
     def validate_model(cls, v: str) -> str:
         if ALLOWED_MODELS and v not in ALLOWED_MODELS:
-            raise ValueError(
-                f"Modelo '{v}' no permitido. Permitidos: {sorted(ALLOWED_MODELS)}"
-            )
+            raise ValueError(f"Modelo '{v}' no permitido.")
         return v
 
     @field_validator("method")
     @classmethod
     def validate_method(cls, v: str) -> str:
         if ALLOWED_METHODS and v not in ALLOWED_METHODS:
-            raise ValueError(
-                f"Metodo '{v}' no permitido. Permitidos: {sorted(ALLOWED_METHODS)}"
-            )
+            raise ValueError(f"Metodo '{v}' no permitido.")
         return v
 
 
@@ -195,13 +209,40 @@ class OdooRequest(BaseModel):
 @app.get("/health", tags=["Sistema"])
 def health_check():
     """
-    Verifica el estado del servicio y la conexion con Odoo.
-    No requiere API Key - pensado para monitores y load balancers.
+    Sonda de vida PUBLICA (sin API Key) para monitores y load balancers.
+
+    Devuelve solo lo imprescindible para un chequeo de disponibilidad:
+    si el servicio responde y si Odoo esta conectado. NO revela la lista
+    blanca de modelos/metodos, la version de Odoo ni el estado de la
+    autenticacion: un anonimo que enumera la API no debe obtener de aqui un
+    mapa de la superficie interna. Ese detalle vive en /health/detalle, que
+    exige X-Api-Key. Ver auditoria (hallazgo: fuga de informacion en /health).
     """
     odoo_ok = _default_odoo is not None and _default_odoo.uid is not None
-    status = "ok" if odoo_ok else "degradado"
     return {
-        "status": status,
+        "status": "ok" if odoo_ok else "degradado",
+        "odoo_conectado": odoo_ok,
+    }
+
+
+@app.get(
+    "/health/detalle",
+    tags=["Sistema"],
+    dependencies=[Depends(verify_api_key)],
+)
+@limiter.limit(LIMITE_LECTURA)
+def health_detalle(request: Request):
+    """
+    Detalle de salud PROTEGIDO (requiere X-Api-Key).
+
+    Reune la informacion operativa que antes filtraba /health en abierto:
+    version de Odoo, estado de la autenticacion y las listas blancas de
+    modelos y metodos. Util para diagnostico interno sin exponer la
+    arquitectura a cualquiera que llegue al puerto.
+    """
+    odoo_ok = _default_odoo is not None and _default_odoo.uid is not None
+    return {
+        "status": "ok" if odoo_ok else "degradado",
         "odoo_conectado": odoo_ok,
         # Version del servidor Odoo detectada en el arranque. Util para verificar
         # de un vistazo contra que version se esta hablando (17/18/19).

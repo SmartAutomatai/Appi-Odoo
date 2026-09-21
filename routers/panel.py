@@ -429,8 +429,15 @@ function mostrarPuerta(mensaje){
 
 function salir(){ sessionStorage.removeItem("apikey"); location.reload(); }
 
+// Escapa para insertar en HTML. Incluye comillas (" y ') a proposito: esta
+// funcion se usa tambien DENTRO de atributos -p.ej. class="badge ${esc(x)}"-,
+// y sin escapar las comillas un valor como '" onerror=...' podria romper el
+// atributo e inyectar codigo (XSS). Hoy esos atributos reciben enums fijos,
+// pero el contrato de esc() debe ser seguro en cualquier contexto para que
+// reutilizarla con un dato libre no abra un agujero.
 function esc(s){ return (s===null||s===undefined)?"":String(s)
-  .replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;"); }
+  .replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;")
+  .replace(/"/g,"&quot;").replace(/'/g,"&#39;"); }
 function fecha(s){ return s? new Date(s).toLocaleString() : ""; }
 
 // Ultimas respuestas, compartidas con la escena 3D para no duplicar peticiones.

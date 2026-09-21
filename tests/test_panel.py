@@ -114,6 +114,16 @@ class TestRouterPanel:
         assert "Panel de sincronizacion" in r.text
         assert "Poller ahora" in r.text
 
+    def test_esc_escapa_comillas_para_evitar_xss_en_atributos(self, monkeypatch):
+        # esc() se usa dentro de atributos (class="badge ${esc(x)}"); si no
+        # escapa comillas, un dato con '"' podria romper el atributo e inyectar
+        # codigo. El HTML servido debe traer la version endurecida de esc().
+        monkeypatch.delenv("API_KEY", raising=False)
+        html = client.get("/panel").text
+        assert "&quot;" in html and "&#39;" in html, (
+            "esc() debe escapar comillas dobles y simples (defensa XSS)"
+        )
+
     def test_api_resumen_sin_key_devuelve_401(self, monkeypatch):
         monkeypatch.setenv("API_KEY", "secreta")
         r = client.get("/panel/api/resumen")

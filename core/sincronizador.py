@@ -161,9 +161,16 @@ def _sincronizar_contra_odoo(
         )
         state_store.log(entidad, "crear", "OK", id_origen, f"id_odoo={id_odoo}")
     except OdooExecutionError as e:
+        # El texto interno (log/estado) conserva el error COMPLETO; el que sube
+        # al cliente se sanea, porque un OdooExecutionError puede traer SQL de
+        # PostgreSQL (tablas, columnas). El proxy /odoo ya saneaba, pero esta
+        # via de negocio -/facturas, /pagos...- devolvia el crudo. Ver H-5b.
+        from core.seguridad import sanear_error_odoo
         state_store.marcar_estado(entidad, id_origen, EstadoSync.ERROR, error=str(e))
         state_store.log(entidad, "crear", "ERROR", id_origen, str(e))
-        raise SincronizacionError(f"Error al crear en Odoo: {e}") from e
+        raise SincronizacionError(
+            f"Error al crear en Odoo: {sanear_error_odoo(e)}"
+        ) from e
 
     return _postear_y_validar(
         entidad, registro, odoo, id_origen, conf, model_odoo, id_odoo,
@@ -245,8 +252,12 @@ def _postear_y_validar(
             error=f"Creado (id_odoo={id_odoo}) pero fallo action_post: {e}",
         )
         state_store.log(entidad, "postear", "ERROR", id_origen, str(e))
+        # Igual que en el create: el mensaje al cliente se sanea (puede llevar
+        # SQL de PostgreSQL); el log de arriba guarda el crudo. Ver H-5b.
+        from core.seguridad import sanear_error_odoo
         raise SincronizacionError(
-            f"Creado en Odoo (id={id_odoo}) pero fallo al postear: {e}",
+            f"Creado en Odoo (id={id_odoo}) pero fallo al postear: "
+            f"{sanear_error_odoo(e)}",
             id_odoo=id_odoo,
         ) from e
 
