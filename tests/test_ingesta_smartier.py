@@ -33,7 +33,7 @@ def _producto():
     }
 
 
-def _nota(estado="Facturada", con_rif=True, nota_id=9001):
+def _nota(estado="Facturado", con_rif=True, nota_id=9001):
     return {
         "Id": nota_id,
         "Estado": estado,
@@ -102,7 +102,7 @@ class TestTraduccion:
         assert meta["nota_id"] == 9001
         assert meta["cliente_id"] == 8
         assert meta["producto_iva"] == 16
-        assert meta["estado"] == "Facturada"
+        assert meta["estado"] == "Facturado"
 
 
 class TestIngesta:
@@ -115,6 +115,10 @@ class TestIngesta:
         monkeypatch.setenv("SOURCE_DATABASE_URL", f"sqlite:///{tmp_path / 'cola.db'}")
         monkeypatch.setenv("SMARTIER_BASE_URL", "https://falso.test/api/v2")
         monkeypatch.setenv("SMARTIER_API_KEY", "clave-de-prueba")
+        # Fijado aqui a proposito: sin esto el test lee SMARTIER_ESTADOS_FACTURAR
+        # del .env de la maquina y pasa o falla segun contra que instancia este
+        # apuntando quien lo ejecute.
+        monkeypatch.setenv("SMARTIER_ESTADOS_FACTURAR", "Facturado")
 
         import core.state_store as state_store
         importlib.reload(state_store)
@@ -151,11 +155,11 @@ class TestIngesta:
             assert all(f.entidad == "factura" for f in filas)
 
     def test_omite_las_notas_en_otro_estado(self, entorno):
-        """Solo se factura lo que Smartier marca como Facturada."""
+        """Solo se factura lo que Smartier marca como Facturado."""
         ing, cli_ps = entorno
         cli = self._cliente_falso([
             _nota(estado="Pendiente", nota_id=1),
-            _nota(estado="Facturada", nota_id=2),
+            _nota(estado="Facturado", nota_id=2),
             _nota(estado="EnTransito", nota_id=3),
         ])
 

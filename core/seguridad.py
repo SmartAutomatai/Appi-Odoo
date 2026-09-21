@@ -74,10 +74,37 @@ def verify_api_key(x_api_key: Optional[str] = Depends(api_key_header)) -> None:
         raise HTTPException(status_code=401, detail="API Key invalida o ausente.")
 
 
+def tenants_permitidos() -> tuple:
+    """
+    Lista blanca de tenants que la API acepta, leida del entorno en cada
+    llamada (como API_KEY) para poder cerrarla sin reiniciar.
+
+    Vacia = solo "default". Es el valor seguro: hoy solo hay una API Key, asi
+    que quien la tenga podria pedir cualquier tenant registrado con solo
+    cambiar un campo del JSON. Mientras exista un unico inquilino el riesgo es
+    teorico, pero se cierra ahora para que no se cuele al anadir el segundo.
+    """
+    crudo = os.getenv("TENANTS_PERMITIDOS", "").strip()
+    if not crudo:
+        return ("default",)
+    return tuple(t.strip() for t in crudo.split(",") if t.strip())
+
+
 def resolver_tenant(tenant: str = "default") -> OdooUniversalAPI:
     """
     Devuelve el conector Odoo del tenant indicado o lanza 400 si no existe.
+
+    El nombre viaja en el JSON de la peticion, asi que antes de usarlo se
+    contrasta con la lista blanca: sin eso, el valor del cliente decidiria
+    contra que instancia de Odoo se escribe.
     """
+    permitidos = tenants_permitidos()
+    if tenant not in permitidos:
+        logger.warning("Rechazado tenant no permitido: %r", tenant)
+        raise HTTPException(
+            status_code=400, detail=f"Tenant '{tenant}' no permitido."
+        )
+
     try:
         return get_tenant(tenant)
     except KeyError:
