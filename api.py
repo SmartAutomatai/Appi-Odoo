@@ -207,7 +207,8 @@ class OdooRequest(BaseModel):
 
 
 @app.get("/health", tags=["Sistema"])
-def health_check():
+@limiter.limit(LIMITE_LECTURA)
+def health_check(request: Request):
     """
     Sonda de vida PUBLICA (sin API Key) para monitores y load balancers.
 
@@ -260,7 +261,8 @@ def health_detalle(request: Request):
     tags=["Sistema"],
     dependencies=[Depends(verify_api_key)],
 )
-def estado_sincronizacion(entidad: str, id_origen: str):
+@limiter.limit(LIMITE_LECTURA)
+def estado_sincronizacion(request: Request, entidad: str, id_origen: str):
     """
     Consulta el estado de sincronizacion de un registro de origen en la base de
     datos de control (state store). Util para seguimiento e idempotencia.

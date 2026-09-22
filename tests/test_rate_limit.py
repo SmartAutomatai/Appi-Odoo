@@ -87,6 +87,13 @@ class TestCoberturaDelLimite:
         ("GET", "/panel/api/logs"),
     ]
 
+    # Rutas que FastAPI monta solas y no son nuestras. Todo lo demas debe
+    # llevar limite, incluido /health: es publico y sin autenticar, o sea el
+    # blanco mas comodo para saturar el servicio.
+    SIN_LIMITE_JUSTIFICADO = {
+        "/openapi.json", "/docs", "/docs/oauth2-redirect", "/redoc",
+    }
+
     def test_todos_los_endpoints_tienen_limite(self):
         rutas_con_limite = set()
         for ruta in app.routes:
@@ -98,6 +105,30 @@ class TestCoberturaDelLimite:
 
         faltan = [e for e in self.ENDPOINTS if tuple(e) not in rutas_con_limite]
         assert not faltan, f"endpoints sin rate limit: {faltan}"
+
+    def test_ninguna_ruta_montada_se_queda_fuera(self):
+        """
+        Recorre las rutas REALES de la app en vez de una lista escrita a mano.
+
+        La lista de arriba solo protege lo que alguien se acordo de anotar:
+        /health llevaba sin limite y este test pasaba en verde, porque nadie lo
+        habia anadido. Un endpoint nuevo entra aqui solo.
+        """
+        sin_limite = []
+        for ruta in app.routes:
+            camino = getattr(ruta, "path", "")
+            fn = getattr(ruta, "endpoint", None)
+            metodos = getattr(ruta, "methods", None)
+            if fn is None or not metodos or camino in self.SIN_LIMITE_JUSTIFICADO:
+                continue
+            if not hasattr(fn, "__wrapped__"):
+                sin_limite.append((sorted(metodos), camino))
+
+        assert not sin_limite, (
+            f"rutas sin rate limit: {sin_limite}. Anade @limiter.limit(...) o, "
+            "si de verdad debe quedar fuera, justificalo en "
+            "SIN_LIMITE_JUSTIFICADO."
+        )
 
     def test_el_poller_tiene_un_limite_mas_estricto(self):
         """Una pasada del poller cuesta ~30 s: su limite debe ser bajo."""

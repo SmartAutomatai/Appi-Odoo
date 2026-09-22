@@ -104,7 +104,8 @@ def api_cola(
 
 @router.get("", response_class=HTMLResponse)
 @router.get("/", response_class=HTMLResponse)
-def panel_html():
+@limiter.limit(LIMITE_LECTURA)
+def panel_html(request: Request):
     """Sirve el dashboard HTML (shell). Los datos se cargan via fetch con API Key."""
     return HTMLResponse(content=_PANEL_HTML)
 

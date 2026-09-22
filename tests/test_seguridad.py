@@ -155,3 +155,48 @@ class TestSaneadoDeErroresDeOdoo:
         assert "secreta_xyz" in caplog.text
         referencia = salida.rsplit(": ", 1)[1]
         assert referencia in caplog.text
+
+
+class TestTenantEnListaBlanca:
+    """
+    El tenant viaja en el JSON del cliente: no se acepta a ciegas.
+
+    Hallazgo de la auditoria (21/09/2026): resolver_tenant() solo comprobaba
+    que el tenant estuviese REGISTRADO, asi que quien tuviera la API Key podia
+    elegir contra que instancia de Odoo escribir con solo cambiar un campo.
+    """
+
+    def test_por_defecto_solo_default(self, monkeypatch):
+        monkeypatch.setenv("TENANTS_PERMITIDOS", "")
+        from core.seguridad import tenants_permitidos
+        assert tenants_permitidos() == ("default",)
+
+    def test_rechaza_un_tenant_registrado_pero_no_permitido(self, monkeypatch):
+        # El caso que importa: existe en _tenants, luego get_tenant lo
+        # devolveria. Lo frena la lista blanca, no la ausencia de registro.
+        from unittest.mock import MagicMock
+        import odoo_universal
+        from core.seguridad import resolver_tenant
+
+        odoo_universal._tenants["cliente_ajeno"] = MagicMock()
+        monkeypatch.setenv("TENANTS_PERMITIDOS", "")
+        try:
+            with pytest.raises(HTTPException) as e:
+                resolver_tenant("cliente_ajeno")
+            assert e.value.status_code == 400
+            assert "no permitido" in e.value.detail
+        finally:
+            odoo_universal._tenants.pop("cliente_ajeno", None)
+
+    def test_se_abre_explicitamente(self, monkeypatch):
+        from unittest.mock import MagicMock
+        import odoo_universal
+        from core.seguridad import resolver_tenant
+
+        conector = MagicMock()
+        odoo_universal._tenants["cliente_ajeno"] = conector
+        monkeypatch.setenv("TENANTS_PERMITIDOS", "default,cliente_ajeno")
+        try:
+            assert resolver_tenant("cliente_ajeno") is conector
+        finally:
+            odoo_universal._tenants.pop("cliente_ajeno", None)
