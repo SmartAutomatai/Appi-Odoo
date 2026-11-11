@@ -19,6 +19,8 @@ from dataclasses import asdict
 from core.celery_app import celery_app
 from core.conciliacion import ConciliacionError, conciliar
 from core.facturacion import crear_factura
+from core.fibex_poller import procesar_asistencias, procesar_dia_anterior
+from core.fibex_source import FibexSourceError
 from core.inventario import ajustar_stock
 from core.pagos import crear_pago
 from core.poller import procesar_lote
@@ -101,6 +103,36 @@ def poller_task(self, tenant: str = "default", limite: int = 50) -> dict:
     fallos de datos por fila no abortan la pasada (quedan ERROR en la cola).
     """
     resultado = procesar_lote(tenant=tenant, limite=limite)
+    return asdict(resultado)
+
+
+@celery_app.task(
+    bind=True,
+    autoretry_for=(OdooConnectionError, FibexSourceError),
+    retry_backoff=_BACKOFF_BASE,
+    retry_backoff_max=300,
+    retry_jitter=True,
+    max_retries=_REINTENTOS_MAX,
+)
+def fibex_asistencia_task(
+    self, tenant: str = "default", desde: str = "", hasta: str = ""
+) -> dict:
+    """
+    Pasada del poller de asistencia Fibex (modo pull): consulta las marcas de
+    Fibex y las registra en Odoo. Ejecutada periodicamente por Celery Beat.
+
+    Sin `desde`/`hasta` procesa el DIA ANTERIOR completo (lo recomendado por el
+    PDF de Fibex). Con rango explicito, ese rango (para reprocesos puntuales).
+
+    Reintenta la pasada completa si Odoo esta caido (OdooConnectionError) o si la
+    API de Fibex falla (FibexSourceError: p.ej. 403 de lista blanca, que puede
+    ser transitorio hasta que autoricen la IP). Los fallos de datos por marca no
+    abortan la pasada (quedan ERROR, auditables en el panel).
+    """
+    if desde and hasta:
+        resultado = procesar_asistencias(desde, hasta, tenant=tenant)
+    else:
+        resultado = procesar_dia_anterior(tenant=tenant)
     return asdict(resultado)
 
 

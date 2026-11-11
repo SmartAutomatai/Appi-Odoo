@@ -56,6 +56,32 @@ if os.getenv("SOURCE_DATABASE_URL"):
         }
     }
 
+# ---------------------------------------------------------------------------
+# Celery Beat: poller de asistencia Fibex (modo pull desde la API de Fibex).
+#
+# Independiente del poller de cola (arriba): se programa solo si hay FIBEX_API_URL.
+# Fibex recomienda "una vez al dia consultar el dia anterior", asi que por defecto
+# corre a una hora fija diaria (FIBEX_POLLER_HORA, UTC) procesando el dia anterior.
+# Requiere arrancar Celery Beat (mismo proceso que el poller de cola):
+#   celery -A core.celery_app.celery_app beat --loglevel=info
+# ---------------------------------------------------------------------------
+if os.getenv("FIBEX_API_URL"):
+    from celery.schedules import crontab
+
+    _FIBEX_TENANT = os.getenv("FIBEX_POLLER_TENANT", "default")
+    # Hora UTC a la que correr (0-23). Venezuela = UTC-4, asi que 7 UTC = 3 a.m.
+    # hora local: el dia anterior ya esta cerrado. Configurable por despliegue.
+    _FIBEX_HORA = int(os.getenv("FIBEX_POLLER_HORA", "7"))
+    _FIBEX_MIN = int(os.getenv("FIBEX_POLLER_MINUTO", "0"))
+    celery_app.conf.beat_schedule = {
+        **getattr(celery_app.conf, "beat_schedule", {}),
+        "fibex-asistencia-diaria": {
+            "task": "core.tasks.fibex_asistencia_task",
+            "schedule": crontab(hour=_FIBEX_HORA, minute=_FIBEX_MIN),
+            "kwargs": {"tenant": _FIBEX_TENANT},
+        },
+    }
+
 
 def en_modo_eager() -> bool:
     """True si Celery corre inline (sin broker). Util para la respuesta HTTP."""

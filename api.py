@@ -92,13 +92,14 @@ if os.getenv("SOURCE_DATABASE_URL", ""):
 # Routers de negocio (facturas, pagos). Endpoints con estado e idempotencia.
 # panel: dashboard de observabilidad (lectura de sync_map/sync_log).
 # asientos: crear/eliminar asientos contables (account.move tipo 'entry').
-from routers import asientos, conciliacion, facturas, inventario, pagos, panel, poller  # noqa: E402  (import tras crear la app)
+from routers import asientos, asistencia, conciliacion, facturas, inventario, pagos, panel, poller  # noqa: E402  (import tras crear la app)
 
 app.include_router(facturas.router)
 app.include_router(pagos.router)
 app.include_router(conciliacion.router)
 app.include_router(inventario.router)
 app.include_router(asientos.router)
+app.include_router(asistencia.router)  # /asistencias (fichajes hr.attendance)
 app.include_router(poller.router)  # /poller/ejecutar (pasada manual, protegido)
 app.include_router(panel.router)   # /panel (HTML)
 app.include_router(panel.datos)    # /panel/api/* (JSON, protegido)

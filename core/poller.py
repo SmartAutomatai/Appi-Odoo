@@ -41,6 +41,7 @@ from dataclasses import dataclass
 from core import poller_source, state_store
 from core.state_store import ReservaOcupada
 from core.asientos import AsientoError, crear_asiento
+from core.asistencia import AsistenciaError, registrar_asistencia
 from core.inventario import InventarioError, ajustar_stock
 from core.rollback import compensar_descuadre
 from core.sincronizador import SincronizacionError, sincronizar_entidad
@@ -70,6 +71,9 @@ def _despachar(entidad: str, payload: dict, odoo: OdooUniversalAPI):
     if entidad == "asiento":
         r = crear_asiento(payload, odoo)
         return r.get("id_odoo"), None, f"id_odoo={r.get('id_odoo')}"
+    if entidad == "asistencia":
+        r = registrar_asistencia(payload, odoo)
+        return r.get("id_odoo"), None, f"id_odoo={r.get('id_odoo')} ({r.get('accion')})"
 
     resultado = sincronizar_entidad(entidad, payload, odoo)
     # El numero fiscal SOLO se lee cuando la factura se acaba de crear. En un
@@ -159,7 +163,7 @@ def _procesar_fila(fila: dict, odoo: OdooUniversalAPI):
             fila_id, entidad, id_origen,
         )
         return None
-    except (SincronizacionError, InventarioError, AsientoError) as e:
+    except (SincronizacionError, InventarioError, AsientoError, AsistenciaError) as e:
         # Fallo de datos (mapeo, create, post, descuadre, cuadre, stock
         # insuficiente...): aisla la fila y sigue con el resto del lote.
         detalle = str(e)
